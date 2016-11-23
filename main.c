@@ -90,6 +90,7 @@ int setup(char inputBuffer[], char *args[],int *background)
                 if (inputBuffer[i] == '&'){
                     *background  = 1;
                     inputBuffer[i-1] = '\0';
+                    return ct+1;
                 }
         } /* end of switch */
     }    /* end of for */
@@ -168,7 +169,7 @@ int main(void)
         if(background==1)
             args[lastindex-1]=NULL;
         
-        addHistory(lastindex-background,args);
+        //addHistory(lastindex-background,args);
        
    
         
@@ -219,22 +220,38 @@ void addHistory(int lastindex,char *args[])
     //check if the bacground varsa 1 aşağidan başla
     char *c=NULL;;
     int i;
+    char *result;;
+
     //bu raya ayar cek fatih
     if(startsWith(args[0],"/")==1)
     {
         if(lastindex==2)
             c=args[1];
-        else
+        else if(lastindex>2)
         {
             for(i=1;(i+1)<lastindex;i++)
             {
+                /*
                 char *   temp=concatString(args[i]," ");
                 c=concatString(c,temp);
                 c=concatString(c,args[i+1]);
+                 */
 
                 
+                char *temp=concatString(args[i]," ");
+                c=temp;
+                //  strcpy(c,temp);
+                c=concatString(c,args[i+1]);
             }
         }
+        else
+        {
+            //result=args[0];
+        }
+        
+        
+       result="";
+        
     }
     else
     {
@@ -251,6 +268,7 @@ void addHistory(int lastindex,char *args[])
                 
             }
         }
+         result=concatString("/bin/",args[0]);
     }
     
     
@@ -261,12 +279,11 @@ void addHistory(int lastindex,char *args[])
 
     //pNode->command = 1567+i;
     strncpy(pNode->command, c,strlen(c));
-    char *temp;
-    temp=concatString("/bin/",args[0]);
+   // result=concatString("/bin/",args[0]);
     //strncpy(dest, src, 10);
     //strcpy(pNode->begining,temp);
     
-    strncpy(pNode->begining, temp, strlen(temp));
+    strncpy(pNode->begining, result, strlen(result));
     AppendNodeH(pNode);
     Hi.head=hHead;
     Hi.tail=hTail;
@@ -367,6 +384,7 @@ void builtinCommand(char *args[],int index)
     {
         
 #if DEBUG_MODE
+        int i;
         for (i = 0; i < strlen(args); i++)
             fprintf(stderr,"args %d = %s\n",i,args[i]);
 #endif
@@ -407,8 +425,9 @@ void builtinCommand(char *args[],int index)
     else if(index==3)
     {
         pid_t ch_pid;
-        while((ch_pid=wait(NULL)) > 0) ;    /* wait for all of your children */
-        fprintf(stderr, "Done  ID:%ld\n",(long)ch_pid);
+        while((ch_pid=wait(NULL)) > 0) { /* wait for all of your children */
+            fprintf(stderr, "Done  ID:%ld\n",(long)ch_pid);
+        }
         
     }
     else if(index==4)
