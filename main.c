@@ -1,18 +1,35 @@
-#include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include "sys/wait.h"
+#include <fcntl.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#define CREATE_FLAGS (O_WRONLY | O_CREAT | O_APPEND)
+#define CREATE_MODE (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+
 #define MAX_LINE 80 /* 80 chars per line, per command, should be enough. */
 #define DEBUG_MODE 0
 
+struct BackgroudProcess {
+    struct BackgroudProcess *pNext;
+    struct BackgroudProcess *pPrev;
+    pid_t pid;
+    int count;
+    int alive;//0 is live,0 is finished
+};
+typedef struct BackgroudProcess BProcces;
 
-struct History {
+BProcces *pHead;
+BProcces *pTail;
+
+struct History {//hold history//Double link-list
     struct History *pNext;
     struct History *pPrev;
     char command[100];
-    char begining[10];
+    char inputBuffer[MAX_LINE];
     
 };
 struct Hist {
@@ -23,14 +40,24 @@ struct Hist {
 };
 struct Hist Hi;
 typedef struct History History;
+typedef struct History *PHistory;
 History *hHead;
 History *hTail;
+struct Pipe {
+    char inputBuffer[MAX_LINE];
+    int startIndex;
+    int lock;
+    int count;
+    //hist -set num
+};
+struct Pipe Pipe;
+
+/*
+ ls -l | tail -1 | cut -d " " -f 1
+ */
 
 
-
-
-
-int setup(char inputBuffer[], char *args[],int *background)
+int setup(char inputBuffer[], char *args[],int *background,int flag,char saveInputBuffer[])
 {
     int length, /* # of characters in the command line */
     i,      /* loop index for accessing inputBuffer array */
@@ -40,7 +67,17 @@ int setup(char inputBuffer[], char *args[],int *background)
     ct = 0;
     
     /* read what the user enters on the command line */
-    length = read(STDIN_FILENO,inputBuffer,MAX_LINE);
+    if(flag==0){
+        length = read(STDIN_FILENO,inputBuffer,MAX_LINE);
+        
+    }
+    else if (flag==2 | flag==3)
+        length=strlen(inputBuffer);
+    
+    
+    if(saveInputBuffer!=NULL)
+        strcpy(saveInputBuffer, inputBuffer);
+    
     
     /* 0 is the system predefined file descriptor for stdin (standard input),
      which is the user's screen in this case. inputBuffer by itself is the
@@ -49,8 +86,12 @@ int setup(char inputBuffer[], char *args[],int *background)
      read in. inputBuffer is not a null terminated C-string. */
     
     start = -1;
-    if (length == 0)
-        exit(0);            /* ^d was entered, end of user command stream */
+    if (length == 0){
+        fprintf(stderr,"by by \n");
+        exit(0);   /* ^d was entered, end of user command stream */
+    }
+    else if(length==1)
+        return -1;
     
     /* the signal interrupted the read system call */
     /* if the process is in the read() system call, read returns -1
@@ -62,7 +103,7 @@ int setup(char inputBuffer[], char *args[],int *background)
     }
     
     //printf(">>%s<<",inputBuffer);
-    for (i=0;i<length;i++){ /* examine every character in the inputBuffer */
+    for (i=Pipe.startIndex;i<length;i++){ /* examine every character in the inputBuffer */
         
         switch (inputBuffer[i]){
             case ' ':
@@ -82,6 +123,7 @@ int setup(char inputBuffer[], char *args[],int *background)
                 }
                 inputBuffer[i] = '\0';
                 args[ct] = NULL; /* no more arguments to this command */
+                i=999;
                 break;
                 
             default :             /* some other character */
@@ -90,7 +132,24 @@ int setup(char inputBuffer[], char *args[],int *background)
                 if (inputBuffer[i] == '&'){
                     *background  = 1;
                     inputBuffer[i-1] = '\0';
+                    i=1000;
+                    ct=ct+1;
                 }
+                else if(inputBuffer[i] == '|')
+                {
+                    //inputBuffer[i+1] = '\0';
+                    if(Pipe.startIndex==0 & Pipe.lock==0)//save orginal input buffer
+                        strcpy(Pipe.inputBuffer, saveInputBuffer);
+                    
+                    Pipe.startIndex=i+1;
+                    Pipe.lock=1;
+                    Pipe.count=Pipe.count+1;
+                    if(flag==3)
+                        i=999;
+                    
+                    //i=999;
+                }
+                
         } /* end of switch */
     }    /* end of for */
     args[ct] = NULL; /* just in case the input line was > 80 */
@@ -104,15 +163,18 @@ int setup(char inputBuffer[], char *args[],int *background)
     return ct;
     
 }
-int startsWith(const char *a, const char *b)
+
+int cmpStrings(const char *a, const char *b)//compare two string
 {
+    if(a==NULL | b==NULL)
+        return 0;
     if(strncmp(a, b, strlen(b)) == 0) return 1;
     return 0;
 }
-char* concatString(const char *s1, const char *s2)
+
+char* concatString(const char *s1, const char *s2)//to join strings
 {
     char *result = malloc(strlen(s1)+strlen(s2)+1);//+1 for the zero-terminator
-    //in real code you would check for errors in malloc here
     strcpy(result, s1);
     strcat(result, s2);
     return result;
@@ -120,167 +182,224 @@ char* concatString(const char *s1, const char *s2)
 
 
 const char *builtCommands[] = {"cd","dir","clr","wait","hist","exit","!"};
-int startsWith(const char *a, const char *b);
-void systemCommand(char *args[],int lastindex,int background,History *node);
+int cmpStrings(const char *a, const char *b);
+void systemCommand(char *args[],int lastindex,int background);
+int systemCommandPipe(char *args[],int lastindex,int background,char *args2[],int counter);
 void builtinCommand(char *args[],int index);
-void executeChild(char *args[],int ct,History * node);
-char *currentpath;
+void executeChild(char *args[],int ct);
+char *currentpath;//pointer refers current directory always
 void AppendNodeH(History *hNode);
-/*
-void RemoveNodeH(History *hNode);
+void AppendNodeProcces(pid_t p);
+int checkBorS(char *args[]);
+PHistory checkHist(char *c);
+int pipeCommand(int count);
 void DeleteAllHistory();
- */
-void addHistory(int lastindex,char *args[]);
+
+
+void addHistory(int lastindex,char *args[],char *point,int background);
 
 int main(void)
 {
-    char inputBuffer[MAX_LINE]; /*buffer to hold command entered */
+    char inputBuffer[MAX_LINE];
+    char orginalBuffer[MAX_LINE];/*buffer to hold command entered */
     int background; /* equals 1 if a command is followed by '&' */
     char *args[MAX_LINE/2 + 1]; /*command line arguments */
     Hi.limit=10;
-   
+    Pipe.startIndex=0;
+    Pipe.lock=0;
+    Pipe.count=0;
+
     
-  
+    char cwd[1024];//array hold to current directory
     
-    char cwd[1024];
     
-    int flag=-1;
     
     if (getcwd(cwd, sizeof(cwd)) != NULL)
-        ///fprintf(stderr, "Current working dir: %s\n", cwd);
-        
         currentpath=cwd;
+    
     int lastindex=0;
     while (1){
         
-        flag=-1;
+        Pipe.startIndex=0;
+        Pipe.lock=0;
+        Pipe.count=0;
         chdir(currentpath);
         if (getcwd(cwd, sizeof(cwd)) != NULL)
             //fprintf(stderr, "-----------: %s\n", cwd);
             
-            background = 0;
+        background = 0;
         fprintf(stderr,"CSE333sh: ");
-        //printf("CSE333sh: ");
-        /*setup() calls exit() when Control-D is entered */
         
-        lastindex=setup(inputBuffer, args, &background);
+        lastindex=setup(inputBuffer, args, &background,0,orginalBuffer);
+        if(lastindex==-1)//Check for null input
+            continue;
         
-        if(background==1)
-            args[lastindex-1]=NULL;
+        int flag=checkBorS(args);//check Builtin or System Command
+        if(flag==-2)
+             continue;
         
-        addHistory(lastindex-background,args);
-       
-   
         
-        /*
-         if(strcmp(args[lastindex-1], "&")==0 | strcmp(args[lastindex-1], "|")==0){
-         fprintf(stderr,"Last index background or pipe  %d",lastindex);
-         }
-         */
-        /*
-         char *envp[] =
-         {
-         "HOME=/home/student",
-      1   "PATH=/bin:/usr/bin",
-         "TZ=UTC0",
-         "USER=student",
-         "LOGNAME=tarzan",
-         0
-         };
-         */
-        int b;
-        for(b=0;b<=6;b++)
+        if(flag!=6)
+            addHistory(lastindex-background,args,orginalBuffer,background);
+        
+        if(flag==-1 & Pipe.lock==0)//it is shell command
+            systemCommand(args, lastindex, background);
+        else if(Pipe.lock==0)
+            builtinCommand(args,flag);
+        else if(Pipe.lock==1)//Multiple Command with Pipe
         {
-            if(strcmp(args[0], builtCommands[b])==0)//it is builtin command
-            {
-                flag=b;
-                break;
-            }
+            if(pipeCommand(Pipe.count)==-1)
+                perror("Failed to setup pipeline");
         }
         
-        if(flag==-1)//it is shell command
-            systemCommand(args, lastindex, background,NULL);
-        else
-            builtinCommand(args,flag);
         
-        
-        
-        
-        /** the steps are:
-         (1) fork a child process using fork()
-         (2) the child process will invoke execvp() or execl()
-         (3) if background == 0, the parent will wait,
-         otherwise it will invoke the setup() function again. */
     }
     
 }
-void addHistory(int lastindex,char *args[])
+int pipeCommand(int count)
 {
-    //check if the bacground varsa 1 aşağidan başla
+    Pipe.startIndex=0;
+    
+    char *args[MAX_LINE/2 + 1];
+    
+    int backgroud;
+    int lastindex;
+    
+    char inputBuffer[MAX_LINE];
+    
+    pid_t childpid;
+    int numofCommands=count+1;
+    
+    int fd[2];
+
+    
+    int i;
+    
+    int oldPipe=0;
+    for(i=0;i<numofCommands;i++)
+    {
+        
+         if(pipe(fd) < 0)
+              perror("Failed to setup pipeline");
+        
+        
+        strcpy(inputBuffer, Pipe.inputBuffer);
+        lastindex=setup(inputBuffer, args, &backgroud,3,NULL);
+        if (((childpid = fork()) == -1)) {
+            perror("Failed to setup pipeline");
+            return 1;
+        }
+        if (childpid == 0)
+        {
+           
+            
+            dup2(oldPipe, 0);//0 for stdın,
+          
+            
+            
+            
+            if(i!=numofCommands-1)//if not last command
+            {
+                if (dup2(fd[1], STDOUT_FILENO) == -1){
+                    perror("Failed to redirect stdout of ls");
+                }
+            }
+       
+        
+            
+            close(fd[0]);
+            
+            
+            executeChild(args,lastindex);
+            return 1;
+            
+            
+        }
+        else
+        {
+         
+            if(waitpid(childpid, NULL, 0)== -1 ){
+                perror("Patlayi ne yapcaz :D");
+                return 1;
+            }
+            oldPipe = fd[0];
+            close(fd[1]);
+            
+            
+        }
+        
+    }
+    
+    
+    return 0;
+}
+int checkBorS(char *args[])
+{
+    
+    if(args[0]==NULL)
+        return -2;
+    int b;
+    for(b=0;b<=6;b++)
+    {
+        if(strcmp(args[0], builtCommands[b])==0)//it is builtin command
+        {
+            return b;
+            
+        }
+    }
+    return -1;
+}
+void addHistory(int lastindex,char *args[],char *point,int background)
+{
+    
     char *c=NULL;;
     int i;
-    //bu raya ayar cek fatih
-    if(startsWith(args[0],"/")==1)
-    {
-        if(lastindex==2)
-            c=args[1];
-        else
-        {
-            for(i=1;(i+1)<lastindex;i++)
-            {
-                char *   temp=concatString(args[i]," ");
-                c=concatString(c,temp);
-                c=concatString(c,args[i+1]);
-
-                
-            }
-        }
-    }
+    char *result;;
+    
+    if(lastindex==1)
+        c=args[0];
     else
     {
-        if(lastindex==1)
-            c=args[0];
-        else
+        
+        c=args[0];
+        c=concatString(c, " ");
+        char *temp;
+        for(i=1;(i)<lastindex;i++)
         {
-            for(i=0;(i+1)<lastindex;i++)
-            {
-             char *temp=concatString(args[i]," ");
-                c=temp;
-              //  strcpy(c,temp);
-                c=concatString(c,args[i+1]);
-                
-            }
+            
+            temp=concatString(args[i]," ");
+            
+            c=concatString(c,temp);
+            
         }
+        
     }
-    
-    
+
+    if(background==1)
+        c=concatString(c," &");
     History *pNode;
     
-    //pNode = (History *)malloc(sizeof(History));
     pNode = (History *)calloc(1,sizeof(History));
-
-    //pNode->command = 1567+i;
-    strncpy(pNode->command, c,strlen(c));
-    char *temp;
-    temp=concatString("/bin/",args[0]);
-    //strncpy(dest, src, 10);
-    //strcpy(pNode->begining,temp);
     
-    strncpy(pNode->begining, temp, strlen(temp));
+    strncpy(pNode->command, c,strlen(c));
+    
+    
+    strcpy(pNode->inputBuffer,point);
+    
     AppendNodeH(pNode);
     Hi.head=hHead;
     Hi.tail=hTail;
-
+    
 }
-void systemCommand(char *args[],int lastindex,int background,History * node)
+
+
+
+void systemCommand(char *args[],int lastindex,int background)
 {
-    ///fprintf(stderr,"I am  systemCommand %ld \n", (long)getpid());
-    
-    
-    
+
     pid_t childpid;
     childpid = fork();
-    
+    int valuereturn=0;
     if (childpid == -1) {
         perror("Failed to fork");
         //return 1;
@@ -288,100 +407,61 @@ void systemCommand(char *args[],int lastindex,int background,History * node)
     if (childpid >0 ) {                          // parent code /
         
         if(!background)//background procces
-        {    //waitpid(childpid,NULL,NULL);
+        {
             
-            // if(wait(NULL>0);
-            //wait(NULL);this  is equal waitpid(-1,NULL,0);
-            waitpid(childpid, NULL, 0);
-            /*
-            
-            if(childpid != wait(NULL)){
-                perror(" Parent failed to waiting procces");
-                
+            if(waitpid(childpid, &valuereturn, 0)== -1 ){
+                perror("Parent Failed to wait child");
                 
             }
-             */
+#if DEBUG_MODE
+            fprintf(stderr, "return value %d \n", valuereturn);
+#endif
+            
             
         }
         else{
-            fprintf(stderr, "[i]  %ld \n", (long)childpid);
+            
+            AppendNodeProcces(childpid);
+            BProcces *pNode;
+            for (pNode = pHead; pNode != NULL; pNode = pNode->pNext) {
+                //printf("%ld\n", pNode->pid);
+                fprintf(stderr, "[%d], %ld \n", pNode->count,pNode->pid);
+            }
+            
         }
         
     }
     if (childpid == 0) {// child code /
-        //fprintf(stderr,"I am child proccess %ld \n", (long)getpid());
         
-        executeChild(args,lastindex,node);
-        // execvp(args[0], &args[0]);
-        //int rc = strcmp(args[0], "cd");
-        // fprintf(stderr," alo  %d",rc);
-        //if(strcmp(args[0], "cd")!=0){
+        executeChild(args,lastindex);
         
-        
-        //execve(args[0], &args[0], envp);
-        
-        /*
-         execvp(args[0], &args[0]);
-         perror("Child failed to execvp the command");
-         */
-        
-        // }
-        /*
-         else{
-         fprintf(stderr,"cd ye bastin: ");
-         char c2;
-         currentpath=args[1];
-         fprintf(stdout, "Current working dir: %s\n", currentpath);
-         }
-         */
-        
-        
-        //return 1;
     }
     
-    /*
-     else
-     {
-     perror(" failed to creating procces");
-     return 1;
-     }
-     */
-    /*
-     if(strcmp(args[0], "cd")==0){
-     if(startsWith(args[1],"/")==1)
-     currentpath=args[1];
-     
-     }
-     */
     
-    // return 1;
 }
 
 void builtinCommand(char *args[],int index)
 {
+    char *args_temp[MAX_LINE/2 + 1];
     
     
-    
-    // fprintf(stderr,"I am  builtinCommand %ld  index %d\n", (long)getpid(),index);
     if(index==0)//cd
     {
         
 #if DEBUG_MODE
+        int i;
         for (i = 0; i < strlen(args); i++)
             fprintf(stderr,"args %d = %s\n",i,args[i]);
 #endif
         
         
-         if(args[1]==NULL)
+        if(args[1]==NULL)
         {
-            //strncpy(currentpath, getenv("HOME"),strlen(getenv("HOME")));
-              strcpy(currentpath, getenv("HOME"));
+            strcpy(currentpath, getenv("HOME"));
         }
-        else if(startsWith(args[1],"/")==1){
-           // int a=strlen(args[1]);
-            //strncpy(currentpath, args[1],a);
+        else if(cmpStrings(args[1],"/")==1){
             strcpy(currentpath, args[1]);
-            // currentpath=args[1];
+          
         }
         else{
             
@@ -398,7 +478,7 @@ void builtinCommand(char *args[],int index)
     }
     else if(index==1)
     {
-       fprintf(stderr, " %s \n", currentpath);
+        fprintf(stderr, "%s\n", currentpath);
     }
     else if(index==2)
     {
@@ -406,97 +486,214 @@ void builtinCommand(char *args[],int index)
     }
     else if(index==3)
     {
+        
         pid_t ch_pid;
-        while((ch_pid=wait(NULL)) > 0) ;    /* wait for all of your children */
-        fprintf(stderr, "Done  ID:%ld\n",(long)ch_pid);
+        while((ch_pid=wait(NULL)) > 0) { // wait for all of your children
+            fprintf(stderr, "Done  ID:%ld\n",(long)ch_pid);
+        }
+        
+        DeleteAllHistory();
+        
+        
         
     }
     else if(index==4)
     {
-        History *pNode;
-        for (pNode = Hi.head; pNode != NULL; pNode = pNode->pNext) {
-            fprintf(stderr,"%s %s \n", pNode->begining,pNode->command);
+        char temp[MAX_LINE];
+
+        if(cmpStrings(args[1],"-set"))
+        {
+            
+            char *ptr;
+            long ret;
+            
+            ret = strtol(args[2], &ptr, 10);
+            
+            
+            if(ret==0)
+                fprintf(stderr,"Invalid input \n");
+            else
+                Hi.limit=ret;
             
         }
-
+        else
+        {
+            History *pNode;
+            pNode = Hi.tail;
+            int counter=1;
+            while(pNode != NULL & counter<=Hi.limit)
+            {
+               ;
+                fprintf(stderr,"%s  \n", pNode->command);
+             
+                pNode = pNode->pPrev;
+                counter++;
+            }
+            
+        }
+        
     }
     else if(index==6)
     {
-        systemCommand(args,index,0,Hi.head);
-    }
-}
-/* end of setup routine */
-void executeChild(char *args[],int ct,History * node){
-    // execvp(args[0], &args[0]);
-    //int rc = strcmp(args[0], "cd");
-    // fprintf(stderr," alo  %d",rc);
-    //if(strcmp(args[0], "cd")!=0){
-    
-    
-    //execve(args[0], &args[0], envp);
-#if DEBUG_MODE
-    fprintf(stderr,"I am child in executeChild %ld \n", (long)getpid());
-#endif
-    
-    //execvp(args[0], &args[0]);
-    //perror("Child failed to execvp the command");
-    
-    
-    if(node==NULL){
         
-        if(startsWith(args[0],"/")==0){
-            
-            execvp(args[0], &args[0]);
+        
+        char orginalBuffer[MAX_LINE];
+        History *pNode;
+        
+        pNode=checkHist(args[1]);
+
+        if(pNode==NULL){//hist içi boş ise
+            fprintf(stderr, "Input is invalid  \n");
+            return ;
         }
-        else{
-            // execl(args[0],&args[0]);
-            // execv(args[0],&args[1]);
-            //background durumunda burda index kontrol yap
-            int i;
-            char *c;
-            for(i=1;(i+1)<ct;i++)
+        
+        Pipe.startIndex=0;
+        Pipe.lock=0;
+        Pipe.count=0;
+        int background;
+        int lastindex;
+        background = 0;
+        lastindex = 0;
+        char temp[MAX_LINE];
+        
+        strcpy(temp, pNode->inputBuffer);
+        lastindex=setup(temp,args_temp , &background, 2,orginalBuffer);
+        
+        
+        int flag=checkBorS(args_temp);
+        
+        if(flag!=6)
+            addHistory(lastindex-background,args_temp,orginalBuffer,background);
+        
+        if(flag==-1 & Pipe.lock==0)//it is shell command
+            systemCommand(args_temp, lastindex, background);
+        else if(Pipe.lock==0)
+            builtinCommand(args_temp,flag);
+        else if(Pipe.lock==1)
+        {
+            pipeCommand(Pipe.count);
+        }
+        
+       
+        
+    }
+    else if(index==5)
+    {
+        BProcces *pNode;
+        for (pNode = pHead; pNode != NULL; pNode = pNode->pNext) {
+            //printf("%ld\n", pNode->pid);
+            int flag=0;
+            
+            pid_t result = waitpid(pNode->pid, NULL, WNOHANG);
+            if (result == 0) {
+                // Child still alive
+                flag=1;
+                pNode->alive=1;
+            } else if (result == -1) {
+                // Error
+                
+                //pNode->alive=-1;
+            } else {
+                // Child exited
+                flag=0;
+                pNode->alive=0;//bitti
+            }
+            
+            fprintf(stderr, " %d, %ld  %d \n", pNode->count,pNode->pid,pNode->alive);
+            if(flag==1)
             {
-                c=concatString(args[i]," ");
-                c=concatString(c,args[i+1]);
+                fprintf(stderr, "You must wait all child,\n");
+                return;
+                
                 
             }
-            //  fprintf(stderr,"CSE333sh: ");
-            execl(args[0], c, NULL);
+            else
+                exit(0);
             
         }
+
+        exit(0);
+    }
+}
+
+
+PHistory checkHist(char *c)
+{
+    History *pNode;
+
+    pNode=Hi.tail;
+    char *ptr;
+    long ret;
+    
+    ret = strtol(c, &ptr, 10);
+    
+#if DEBUG_MODE
+    fprintf(stderr,"number %ld\n", ret);
+    fprintf(stderr,"string |%s| \n", ptr);
+#endif
+    
+    if(ret==0)
+    {
+        int counter=1;
+        while(pNode != NULL  && counter<Hi.limit )
+        {
+            if(cmpStrings(pNode->command, c)){
+                return pNode;
+            }
+            pNode = pNode->pPrev;
+            counter=counter+1;
+            
+        }
+        pNode=NULL;
+        
     }
     else
     {
-        execl(node->begining, node->command, NULL);
+        
+        int counter=1
+        if(ret<0)//-1 for last command
+            ret=ret*-1;
+   
+        if(ret <Hi.limit){
+            while(pNode != NULL & counter<ret && counter<Hi.limit)
+            {
+#if DEBUG_MODE               
+                fprintf(stderr,"%s  \n", pNode->command);
+#endif
+    
+                pNode = pNode->pPrev;
+                counter++;
+            }
+        }
+        else
+            pNode=NULL;
     }
     
-    /*
-     int i;
-     for (i = 0; i <= ct; i++)
-     fprintf(stderr,"args %d = %s\n",i,args[i]);
-     
-     if(startsWith(args[0],"/")!=0)
-     execvp(args[0], &args[0]);
-     else{
-     // execl(args[0],&args[0]);
-     execv(args[0],&args[0]);
-     }
-     perror("Child failed to execvp the command");
-     */
-    //int execv(const char *path, char *const argv[]);
-    // }
-    /*
-     else{
-     fprintf(stderr,"cd ye bastin: ");
-     char c2;
-     currentpath=args[1];
-     fprintf(stdout, "Current working dir: %s\n", currentpath);
-     }
-     */
     
+    return pNode;
+}
+/* end of setup routine */
+void executeChild(char *args[],int ct){
     
+#if DEBUG_MODE
+    fprintf(stderr,"I am child in executeChild %ld _%s\n", (long)getpid(),args[0]);
+#endif
     
-    
+    if(cmpStrings(args[0],"/")==1){
+      
+       //this if-else block is completely unnecessary ,you should only  execvp system call
+        if(ct<=7)
+            execl(args[0],args[1],args[2],args[3],args[4],args[5],args[6],args[7],args[8],NULL);
+        else
+            execvp(args[0], &args[0]);
+            perror("Failed to exec ");
+    }
+    else{
+         execvp(args[0], &args[0]);
+         perror("Failed to exec ");  
+        
+    }
+    exit(1);//when the proccess faild to exec ,it forced to exit(kill ) on system
     
 }
 void AppendNodeH(History *hNode)
@@ -515,75 +712,51 @@ void AppendNodeH(History *hNode)
     hNode->pNext = NULL;
     
 }
-/*
+void AppendNodeProcces(pid_t p)
+{
+    
+    BProcces *pNode;
+    pNode = (BProcces *)calloc(1,sizeof(BProcces));
+    pNode->pid = p;
+    pNode->alive=1;///default is alive
+    
+    
+    
+    if (pHead == NULL) {
+        pNode->count=0;
+        pHead = pNode;
+        pNode->pPrev = NULL;
+    }
+    else {
+        pTail->pNext = pNode;
+        pNode->count=pTail->count+1;
+        pNode->pPrev = pTail;
+        
+    }
+    pTail = pNode;
+    pNode->pNext = NULL;
+    
+}
+void RemoveNodeProcces(BProcces *pNode)
+{
+    if (pNode->pPrev == NULL)
+        pHead = pNode->pNext;
+    else
+        pNode->pPrev->pNext = pNode->pNext;
+    if (pNode->pNext == NULL)
+        pTail = pNode->pPrev;
+    else
+        pNode->pNext->pPrev = pNode->pPrev;
+    free(pNode);
+        
+}
+
 void DeleteAllHistory()
 {
-    while (hHead != NULL){
-        RemoveNode(hHead);
+    while (pHead != NULL){
+        RemoveNodeProcces(pHead);
     }
 }
-
-void RemoveNodeH(History *hNode)
-{
-    if (hNode->pPrev == NULL)
-        hHead = hNode->pNext;
-    else
-        hNode->pPrev->pNext = hNode->pNext;
-    if (hNode->pNext == NULL)
-        hTail = hNode->pPrev;
-    else
-        hNode->pNext->pPrev = hNode->pPrev;
-}
-
-*/
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 /*
  *
@@ -592,10 +765,4 @@ void RemoveNodeH(History *hNode)
  *
  *
  */
-
-
-
-
-
-
 
